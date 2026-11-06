@@ -1,0 +1,22 @@
+[Unit]
+Description=API REST Biblioteca (Spring Boot) - Acceso a datos 2 DAM
+After=network-online.target mysql.service
+Wants=network-online.target
+Requires=mysql.service
+
+[Service]
+User=biblioteca
+Group=biblioteca
+WorkingDirectory=/opt/biblioteca
+EnvironmentFile=/etc/biblioteca/biblioteca.env
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/biblioteca/biblioteca.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

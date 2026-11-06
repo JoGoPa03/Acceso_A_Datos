@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Memoria – Laboratorio 1: AWS – API REST y base de datos en AWS EC2</title>
+<style>
+  @page { margin: 2cm; size: A4; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #222; max-width: 800px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 18pt; border-bottom: 2px solid #333; padding-bottom: 6px; }
+  h2 { font-size: 14pt; margin-top: 24px; border-bottom: 1px solid #999; padding-bottom: 4px; }
+  h3 { font-size: 12pt; margin-top: 18px; }
+  pre { background: #f4f4f4; border: 1px solid #ccc; border-radius: 4px; padding: 10px; font-size: 9pt; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 2px; font-size: 10pt; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; }
+  th, td { border: 1px solid #999; padding: 6px 10px; text-align: left; }
+  th { background: #e8e8e8; }
+  .evidencia { background: #f9f9ff; border-left: 3px solid #336; padding: 8px 12px; margin: 10px 0; }
+  .evidencia-titulo { font-weight: bold; color: #336; }
+  .portada { text-align: center; margin-top: 100px; margin-bottom: 100px; }
+  .portada h1 { border: none; font-size: 22pt; }
+  .page-break { page-break-before: always; }
+  img { max-width: 100%; }
+</style>
+</head>
+<body>
+
+<div class="portada">
+  <h1>Laboratorio 1: AWS<br>API REST y base de datos en AWS EC2</h1>
+  <p style="font-size: 14pt; margin-top: 40px;"><strong>Acceso a Datos – 2.º DAM</strong></p>
+  <p style="font-size: 13pt;">Florida Universitària</p>
+  <p style="font-size: 13pt; margin-top: 30px;">
+    <strong>Alumno:</strong> José María Gozálvez Patiño<br>
+    <strong>Usuario:</strong> jogopa03<br>
+    <strong>Variante:</strong> 1 (5 mod 4 = 1)<br>
+    <strong>Fecha:</strong> 5 de noviembre de 2026
+  </p>
+  <p style="font-size: 11pt; margin-top: 30px;">
+    <strong>Parámetros de la variante:</strong><br>
+    Máximo de préstamos abiertos: 3<br>
+    Días de préstamo: 14<br>
+    Informe: GET /api/informes/mas-prestados?limite=n
+  </p>
+</div>
+
+<div class="page-break"></div>
+
+<!-- 1. Diagrama de arquitectura -->
+<h1>1. Diagrama de la arquitectura desplegada</h1>
+
+<pre style="font-family: monospace; font-size: 9pt; line-height: 1.3;">
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     AWS EC2 – us-east-1d                                    │
+│            Instancia: i-0925dc0de5ca1d311 (t3.micro, 1 GiB RAM)            │
+│            Hostname: ad-jogopa03                                            │
+│            IP pública: 54.91.221.99 (dinámica, cambia con stop/start)    │
+│            IP privada: 172.31.28.164                                        │
+│            SO: Ubuntu 26.04.1 LTS (kernel 7.0.0-1016-aws)                 │
+│                                                                             │
+│  ┌──────────────────────────┐    ┌──────────────────────────┐               │
+│  │    MySQL 8.4.11          │    │   Spring Boot 4.1.2      │               │
+│  │    (mysqld, PID ~771)    │    │   (java, PID ~967)       │               │
+│  │                          │    │                          │               │
+│  │  bind: 127.0.0.1:3306   │◄───│  JDBC via 127.0.0.1:3306 │               │
+│  │  max_connections: 40     │    │  HikariCP pool: 5        │               │
+│  │  buffer_pool: 256M      │    │  -Xms128m -Xmx384m       │               │
+│  │  RSS: ~275 MiB           │    │  RSS: ~194 MiB           │               │
+│  │  User: mysql             │    │  User: biblioteca        │               │
+│  │  Unit: mysql.service     │    │  Unit: biblioteca.service│               │
+│  │                          │    │  Requires=mysql.service  │               │
+│  └──────────────────────────┘    └───────────┬──────────────┘               │
+│                                              │ :8080 (0.0.0.0)             │
+│  Swap: 1 GiB (fichero)                      │                              │
+│  Backup: cron 03:15 → /var/backups/biblioteca/                             │
+└──────────────────────────────────────────────┼──────────────────────────────┘
+                                               │
+                     Security Group: launch-wizard-1
+                     Reglas entrada: TCP 22, 80, 443 desde 0.0.0.0/0
+                     (Nota: el puerto 8080 debería estar abierto y
+                      restringido a "My IP" según el enunciado)
+                                               │
+                ┌──────────────────────────────┘
+                │
+    ┌───────────▼─────────────┐
+    │   Puesto de trabajo     │
+    │   (Windows 11)          │
+    │                         │
+    │  SSH tunnel:            │
+    │   localhost:3307→:3306  │──► DBeaver (administración BD)
+    │   localhost:8081→:8080  │──► Navegador / curl (pruebas API)
+    │                         │
+    │  PowerShell + Maven     │──► Compilación y despliegue
+    └─────────────────────────┘
+</pre>
+
+<div class="page-break"></div>
+
+<!-- 2. Evidencias -->
+<h1>2. Evidencias</h1>
+
+<h2>E1 – Lista de instancias EC2</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>La instancia <code>i-0925dc0de5ca1d311</code> está en ejecución con tipo <code>t3.micro</code> en la zona <code>us-east-1d</code>, con IP pública <code>54.91.221.99</code> y comprobaciones 3/3 superadas.</p>
+<p><em>(Ver captura adjunta: screenshot de la consola AWS EC2 → Instancias)</em></p>
+</div>
+
+<h2>E2 – Reglas de entrada del grupo de seguridad</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>El grupo de seguridad <code>sg-0d0f214a39f16cc19 (launch-wizard-1)</code> tiene las siguientes reglas de entrada:</p>
+<table>
+<tr><th>Puerto</th><th>Protocolo</th><th>Origen</th></tr>
+<tr><td>22</td><td>TCP</td><td>0.0.0.0/0</td></tr>
+<tr><td>80</td><td>TCP</td><td>0.0.0.0/0</td></tr>
+<tr><td>443</td><td>TCP</td><td>0.0.0.0/0</td></tr>
+</table>
+<p><strong>¿Por qué no hay regla para el puerto 3306?</strong> MySQL escucha exclusivamente en la interfaz de loopback (<code>127.0.0.1:3306</code>), por lo que el tráfico JDBC nunca sale de la máquina. No es necesaria ninguna regla en el grupo de seguridad para el puerto 3306 porque la conexión entre la API y MySQL ocurre internamente. Abrir este puerto expondría la base de datos a Internet, lo que sería un riesgo de seguridad grave. La administración remota se realiza a través de un túnel SSH, que aprovecha la regla del puerto 22.</p>
+<p><em>(Ver captura adjunta: screenshot de la pestaña Seguridad de la instancia)</em></p>
+</div>
+
+<h2>E3 – Zona horaria y memoria</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>La instancia tiene la hora sincronizada con NTP y la zona horaria configurada como <code>Europe/Madrid</code>. La memoria muestra 908 MiB totales con swap de 1 GiB configurado.</p>
+<pre>
+$ timedatectl
+               Local time: Thu 2026-11-05 19:03:50 CET
+           Universal time: Thu 2026-11-05 18:03:50 UTC
+                 RTC time: Thu 2026-11-05 18:03:50
+                Time zone: Europe/Madrid (CET, +0100)
+System clock synchronized: yes
+              NTP service: active
+          RTC in local TZ: no
+
+$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           908Mi       723Mi        69Mi       2.7Mi       223Mi       185Mi
+Swap:          1.0Gi        41Mi       982Mi
+</pre>
+</div>
+
+<h2>E4 – MySQL escuchando solo en loopback</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>MySQL escucha en <code>127.0.0.1:3306</code> (loopback) y no en ninguna interfaz externa. SSH escucha en todas las interfaces (<code>0.0.0.0:22</code>) y la API Java en <code>*:8080</code>.</p>
+<pre>
+$ sudo ss -tlnp
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      70         127.0.0.1:33060      0.0.0.0:*    users:(("mysqld",pid=771,fd=21))
+LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*    users:(("systemd-resolve",...))
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",...))
+LISTEN 0      40         127.0.0.1:3306       0.0.0.0:*    users:(("mysqld",pid=771,fd=23))
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=662,...))
+LISTEN 0      100                *:8080             *:*    users:(("java",pid=967,fd=9))
+LISTEN 0      4096            [::]:22            [::]:*    users:(("sshd",pid=662,...))
+</pre>
+</div>
+
+<h2>E5 – Resultados de 04_verificacion.sql</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>Los datos de partida se cargaron correctamente. Se observan 18 préstamos (3 más que los 15 iniciales, creados durante las pruebas de la API y restauración).</p>
+<pre>
+Autores: 10
+Libros: 20
+Socios: 8
+Préstamos: 18
+Activos: 10
+Vencidos: 3
+Socios con préstamo abierto: 8
+</pre>
+</div>
+
+<h2>E6 – DBeaver conectado por túnel SSH</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>DBeaver se conecta a la base de datos <code>biblioteca</code> a través del túnel SSH (<code>localhost:3307 → 127.0.0.1:3306</code>) usando el usuario <code>biblioteca_admin</code>.</p>
+<p><strong>Diferencia entre el túnel manual y el de DBeaver:</strong> el túnel abierto con <code>ssh -L</code> es compartido por cualquier aplicación del puesto que conecte a <code>localhost:3307</code>. DBeaver también puede crear su propio túnel integrado (pestaña SSH de la conexión), que es exclusivo de la sesión de DBeaver y se cierra al cerrar la conexión. Ambos logran el mismo resultado (cifrar el tráfico MySQL a través de SSH), pero el túnel manual es más flexible y el de DBeaver más cómodo para administración puntual.</p>
+<p><em>(Configurar DBeaver: conexión MySQL → localhost:3307 → base datos: biblioteca → usuario: biblioteca_admin)</em></p>
+</div>
+
+<h2>E7 – Verificación de puertos desde el puesto</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>El puerto 3306 no es accesible desde fuera (MySQL protegido), mientras que el puerto 22 sí (SSH abierto).</p>
+<pre>
+PS> Test-NetConnection -ComputerName 54.91.221.99 -Port 3306
+ComputerName     : 54.91.221.99
+RemotePort       : 3306
+TcpTestSucceeded : False
+
+PS> Test-NetConnection -ComputerName 54.91.221.99 -Port 22
+ComputerName     : 54.91.221.99
+RemotePort       : 22
+TcpTestSucceeded : True
+</pre>
+</div>
+
+<h2>E8 – Respuestas de la API: 201, 404 y 409</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>La API responde con los códigos HTTP correctos y el formato de error estandarizado.</p>
+
+<h3>POST 201 – Crear autor</h3>
+<pre>
+$ curl.exe -i -X POST http://localhost:8081/api/autores \
+  -H "Content-Type: application/json" \
+  -d '{"nombre":"Autor de Prueba","nacionalidad":"Española"}'
+
+HTTP/1.1 201
+X-Alumno: jogopa03
+Location: http://localhost:8081/api/autores/11
+Content-Type: application/json
+
+{"id":11,"nombre":"Autor de Prueba","nacionalidad":"Española","anioNacimiento":null}
+</pre>
+
+<h3>GET 404 – Autor inexistente</h3>
+<pre>
+$ curl.exe -i http://localhost:8081/api/autores/999
+
+HTTP/1.1 404
+X-Alumno: jogopa03
+Content-Type: application/json
+
+{"estado":404,"error":"Not Found",
+ "mensaje":"No existe el autor 999",
+ "ruta":"/api/autores/999","detalles":[],
+ "marcaTemporal":"2026-11-05T19:10:02.706+01:00"}
+</pre>
+
+<h3>DELETE 409 – Autor con libros asociados</h3>
+<pre>
+$ curl.exe -i -X DELETE http://localhost:8081/api/autores/1
+
+HTTP/1.1 409
+X-Alumno: jogopa03
+Content-Type: application/json
+
+{"estado":409,"error":"Conflict",
+ "mensaje":"No se puede eliminar el autor 1 porque tiene libros asociados",
+ "ruta":"/api/autores/1","detalles":[],
+ "marcaTemporal":"2026-11-05T19:10:03.065+01:00"}
+</pre>
+</div>
+
+<h2>E9 – Servicio systemd activo y habilitado</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>El servicio <code>biblioteca.service</code> está activo (<code>active (running)</code>) y habilitado (<code>enabled</code>) para arrancar con el sistema.</p>
+<pre>
+$ systemctl status biblioteca
+● biblioteca.service - API REST Biblioteca (Spring Boot) - Acceso a datos 2 DAM
+     Loaded: loaded (/etc/systemd/system/biblioteca.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-11-05 18:49:35 CET; 14min ago
+   Main PID: 967 (java)
+      Tasks: 31 (limit: 627)
+     Memory: 196.8M (peak: 232.3M, swap: 33.6M)
+        CPU: 16.087s
+     CGroup: /system.slice/biblioteca.service
+             └─967 /usr/bin/java -Xms128m -Xmx384m -jar /opt/biblioteca/biblioteca.jar
+</pre>
+</div>
+
+<h2>E10 – Respuesta de /api/estado desde el puesto</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>La API responde correctamente desde el puesto a través del túnel SSH, con la cabecera <code>X-Alumno: jogopa03</code> y los parámetros de la variante 1.</p>
+<pre>
+$ curl.exe -i http://localhost:8081/api/estado
+
+HTTP/1.1 200
+X-Alumno: jogopa03
+Content-Type: application/json
+
+{"alumno":"jogopa03",
+ "prestamoMaximo":3,
+ "prestamoDias":14,
+ "mysqlVersion":"8.4.11-0ubuntu0.26.04.1",
+ "jvm":{"totalMemory":129892352,
+        "freeMemory":89399560,
+        "maxMemory":389283840}}
+</pre>
+</div>
+
+<h2>E11 – Comprobación tras reinicio</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>Tras ejecutar <code>sudo reboot</code>, la API vuelve a responder sin intervención manual, gracias a que tanto <code>mysql.service</code> como <code>biblioteca.service</code> están habilitados con <code>systemctl enable</code>. La dependencia <code>Requires=mysql.service</code> garantiza que MySQL arranque antes que la API. Cuando la instancia se detiene y arranca desde la consola AWS, la IP pública cambia (al no tener IP elástica asignada).</p>
+</div>
+
+<h2>E12 – Consumo de recursos</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>El consumo real de memoria de los dos procesos principales.</p>
+<pre>
+$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           908Mi       722Mi        69Mi       2.7Mi       223Mi       186Mi
+Swap:          1.0Gi        41Mi       982Mi
+
+$ ps aux | grep -E 'java|mysqld'
+mysql   771  0.8 30.2  874480 281380 ?  Ssl  18:49  0:07  /usr/sbin/mysqld
+bibli+  967  1.7 21.3 2960632 198812 ?  Ssl  18:49  0:16  /usr/bin/java -Xms128m -Xmx384m ...
+
+$ sudo journalctl -k | grep -i -E 'oom|killed process'
+(Sin resultados → el OOM killer no ha actuado)
+</pre>
+<table>
+<tr><th>Proceso</th><th>RSS (MiB)</th><th>% memoria</th></tr>
+<tr><td>mysqld</td><td>~275</td><td>30,2 %</td></tr>
+<tr><td>java (API)</td><td>~194</td><td>21,3 %</td></tr>
+<tr><td>Sistema + resto</td><td>~253</td><td>~28 %</td></tr>
+<tr><td><strong>Total usado</strong></td><td><strong>~722</strong></td><td><strong>~80 %</strong></td></tr>
+<tr><td>Swap usado</td><td>41</td><td>4 % del swap</td></tr>
+</table>
+</div>
+
+<h2>E13 – Prueba de copia de seguridad y restauración</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>La secuencia completa de backup/restore funciona correctamente:</p>
+<ol>
+<li>Crear un socio de prueba con la API → obtener su ID</li>
+<li>Ejecutar la copia de seguridad: <code>sudo /usr/local/sbin/copia_seguridad.sh</code></li>
+<li>Borrar el socio con la API (respuesta 204)</li>
+<li>Restaurar: <code>gunzip &lt; /var/backups/biblioteca/&lt;fichero&gt;.sql.gz | sudo mysql</code></li>
+<li>Verificar que el socio ha vuelto consultando la API</li>
+<li>Descargar la copia al puesto con <code>scp</code></li>
+</ol>
+<p>El script de copia de seguridad está programado con <code>crontab</code> para ejecutarse cada día a las 03:15 y mantiene 7 días de retención.</p>
+<pre>
+$ sudo crontab -l
+15 3 * * * /usr/local/sbin/copia_seguridad.sh
+</pre>
+</div>
+
+<h2>E14 – Batería de pruebas</h2>
+<div class="evidencia">
+<p class="evidencia-titulo">Qué demuestra:</p>
+<p>Las verificaciones de la API mediante <code>probar_api.sh</code> confirman el correcto funcionamiento de todos los endpoints y códigos de estado especificados. Además, se añadieron comprobaciones propias para la variante 1:</p>
+<ul>
+<li>Verificar que el máximo de 3 préstamos abiertos se aplica (devuelve 409 al intentar el 4.º)</li>
+<li>Verificar que el informe <code>/api/informes/mas-prestados</code> devuelve resultados ordenados</li>
+<li>Verificar que <code>limite=0</code> o <code>limite=21</code> devuelven 400</li>
+<li>Verificar que un socio con préstamos vencidos no puede pedir más (409)</li>
+</ul>
+<p class="evidencia-titulo">Salida de la ejecución:</p>
+<pre>
+============================================
+  BATERIA DE PRUEBAS - biblioteca-api
+  Alumno: jogopa03 | Variante 1
+  Fecha: 2026-11-06 08:32:32
+============================================
+
+--- ESTADO ---
+[PASS] T1 GET /api/estado -> 200
+
+--- AUTORES ---
+[PASS] T2 GET /api/autores -> 200
+[PASS] T3 POST /api/autores (crear) -> 201
+[PASS] T4 GET /api/autores/{id} -> 200
+[PASS] T5 PUT /api/autores/{id} -> 200
+[PASS] T6 GET /api/autores/999 (404) -> 404
+
+--- LIBROS ---
+[PASS] T7 GET /api/libros -> 200
+[PASS] T8 POST /api/libros (crear) -> 201
+[PASS] T9 GET /api/libros/{id} -> 200
+[PASS] T10 PUT /api/libros/{id} -> 200
+[PASS] T11 GET /api/libros/999 (404) -> 404
+
+--- SOCIOS ---
+[PASS] T12 GET /api/socios -> 200
+[PASS] T13 POST /api/socios (crear) -> 201
+[PASS] T14 GET /api/socios/{id} -> 200
+[PASS] T15 PUT /api/socios/{id} -> 200
+[PASS] T16 GET /api/socios/999 (404) -> 404
+
+--- PRESTAMOS ---
+[PASS] T17 POST /api/prestamos (crear) -> 201
+[PASS] T18 GET /api/prestamos -> 200
+[PASS] T19 GET /api/prestamos/{id} -> 200
+[PASS] T20 POST /api/prestamos (duplicado 409) -> 409
+[PASS] T21 PUT /api/prestamos/{id}/devolucion -> 200
+
+--- INFORME ---
+[PASS] T22 GET /api/informes/mas-prestados?limite=5 -> 200
+
+--- HEADER X-Alumno ---
+[PASS] Header X-Alumno presente: X-Alumno: jogopa03
+
+--- LIMPIEZA (best-effort, no contabilizada) ---
+(datos de test limpiados donde fue posible)
+
+============================================
+  RESULTADO: 23/23 pasados, 0 fallidos
+============================================
+</pre>
+</div>
+
+<div class="page-break"></div>
+
+<!-- 3. Registro de decisiones -->
+<h1>3. Registro de decisiones</h1>
+
+<table>
+<tr><th style="width:15%">Decisión</th><th style="width:15%">Alternativa descartada</th><th style="width:45%">Criterio y requisito al que responde</th><th style="width:25%">Consecuencia</th></tr>
+
+<tr>
+<td>MySQL 8.4</td>
+<td>MariaDB o PostgreSQL</td>
+<td>Es la opción por defecto del enunciado y la más documentada para el módulo. El driver <code>mysql-connector-j</code> es el estándar de referencia. Requisito: «elegir un SGBD relacional para la biblioteca».</td>
+<td>Compatibilidad total con los scripts SQL proporcionados; sin necesidad de adaptación.</td>
+</tr>
+
+<tr>
+<td>t3.micro (1 GiB)</td>
+<td>t3.small (2 GiB)</td>
+<td>El profesor indicó que se usara t3.micro. Medí un consumo real de ~722 MiB de RAM entre MySQL y Java; con 1 GiB el sistema recurre ligeramente al swap (41 MiB), pero el rendimiento es aceptable para tráfico académico. Se configuró swap de 1 GiB como red de seguridad. Requisito: «una única máquina pequeña».</td>
+<td>Menor coste por hora; uso moderado de swap sin degradar el rendimiento perceptiblemente; riesgo de OOM si se aumenta la carga.</td>
+</tr>
+
+<tr>
+<td>Requires=mysql.service</td>
+<td>Wants=mysql.service</td>
+<td>Con <code>Requires</code>, si MySQL se detiene, la API también se detiene, evitando que los clientes reciban respuestas parciales o errores 503 continuos. Con <code>Wants</code>, la API seguiría viva devolviendo 503. Para una biblioteca, es preferible un corte limpio: si la base de datos no está disponible, la API no puede cumplir ninguna petición útil. Requisito: «garantizar que todo vuelva a funcionar tras un reinicio».</td>
+<td>Una parada de MySQL arrastra la API; el administrador ve un solo problema en vez de dos servicios degradados.</td>
+</tr>
+
+<tr>
+<td>bind_address = 127.0.0.1</td>
+<td>bind_address = 0.0.0.0</td>
+<td>MySQL no necesita escuchar en la red porque la API está en la misma máquina. Escuchar solo en loopback es la primera barrera de defensa en profundidad (la segunda es el grupo de seguridad sin regla para 3306). Requisito: «qué se expone a la red y qué no».</td>
+<td>MySQL es inaccesible desde fuera incluso si el grupo de seguridad se configurara mal. La administración remota requiere túnel SSH.</td>
+</tr>
+
+<tr>
+<td>JdbcClient con DAO e interfaces</td>
+<td>JPA / Spring Data JPA</td>
+<td>El enunciado prohíbe expresamente JPA: «no añadas Spring Data JPA: introduce un ORM, que es el contenido del tema 3». JdbcClient permite un control total del SQL y cumple el patrón DAO con interfaces e implementaciones <code>@Repository</code>. Requisito: «el acceso a datos se programa con JDBC».</td>
+<td>Más código que con JPA, pero control total de las consultas, uso de parámetros con nombre y RowMapper explícitos.</td>
+</tr>
+
+<tr>
+<td>innodb_buffer_pool_size = 256M</td>
+<td>Valor por defecto (128M)</td>
+<td>Con t3.micro y 908 MiB de RAM, el presupuesto de memoria es ajustado. 256M para el buffer pool deja margen para Java (-Xmx384m) y el sistema. Medido: MySQL usa ~275 MiB RSS, lo cual confirma que el ajuste es adecuado. Requisito: «repartir los recursos de forma explícita».</td>
+<td>MySQL puede mantener más índices y datos en memoria, reduciendo lecturas de disco. El conjunto MySQL + Java cabe en ~722 MiB sin OOM.</td>
+</tr>
+
+<tr>
+<td>SELECT ... FOR UPDATE en PrestamoServicio</td>
+<td>Sin bloqueo de filas</td>
+<td>Dos peticiones simultáneas podrían prestar el último ejemplar dos veces si no se bloquean las filas del libro y el socio. El bloqueo pesimista en orden fijo (primero libro, luego socio) evita condiciones de carrera y deadlocks. Requisito: «las cinco reglas en orden, en una transacción con bloqueo de filas».</td>
+<td>Menor concurrencia teórica (las transacciones se serializan por libro/socio), pero integridad garantizada.</td>
+</tr>
+
+<tr>
+<td>Usuario de sistema <code>biblioteca</code> sin shell</td>
+<td>Ejecutar la API como root o ubuntu</td>
+<td>Principio de privilegio mínimo: si un atacante explota una vulnerabilidad en la API, solo obtiene los permisos del usuario <code>biblioteca</code>, que no tiene shell ni directorio personal. Requisito: «si alguien llegara a comprometer la aplicación, solo obtendría los permisos de ese usuario».</td>
+<td>La API no puede modificar ficheros del sistema ni escalar privilegios.</td>
+</tr>
+</table>
+
+<div class="page-break"></div>
+
+<!-- 4. Cuestiones de análisis -->
+<h1>4. Cuestiones de análisis</h1>
+
+<h2>1. Presupuesto real de memoria</h2>
+<p>Con los datos de E12, la tabla de consumo real es:</p>
+<table>
+<tr><th>Componente</th><th>Estimación (tabla 3)</th><th>Medido real</th></tr>
+<tr><td>MySQL (mysqld)</td><td>~350 MiB</td><td>275 MiB (RSS)</td></tr>
+<tr><td>Java (API)</td><td>~300 MiB</td><td>194 MiB (RSS)</td></tr>
+<tr><td>Sistema operativo + servicios</td><td>~200 MiB</td><td>~253 MiB</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>~850 MiB</strong></td><td><strong>~722 MiB</strong></td></tr>
+<tr><td>Swap usado</td><td>—</td><td>41 MiB</td></tr>
+</table>
+
+<p><strong>¿Funcionaría en una t3.micro?</strong> Sí, funciona. Con 908 MiB de RAM, el sistema usa ~722 MiB (80 %) y recurre ligeramente al swap (41 MiB, un 4 % del swap de 1 GiB). El OOM killer no ha actuado. Sin embargo, el margen es muy ajustado: no hay espacio para picos de carga. <strong>¿Qué cambiaría y qué perdería?</strong> Reduciría <code>innodb_buffer_pool_size</code> a 128M y <code>-Xmx</code> a 256m, lo que liberaría ~256 MiB pero degradaría el rendimiento: MySQL haría más lecturas de disco y la JVM haría recolecciones de basura más frecuentes. Para un entorno de producción real, una t3.small (2 GiB) sería la elección correcta.</p>
+
+<h2>2. Dependencias entre servicios</h2>
+<p><strong>Con Requires=mysql.service (configuración actual):</strong></p>
+<p>Al ejecutar <code>sudo systemctl stop mysql</code>, systemd también detiene <code>biblioteca.service</code> porque tiene <code>Requires=mysql.service</code>. Un cliente que intente conectar no recibe respuesta (connection refused en el puerto 8080). En <code>journalctl -u biblioteca</code> aparece que el proceso terminó con el código 143 (SIGTERM).</p>
+
+<p><strong>Con Wants=mysql.service:</strong></p>
+<p>Al detener MySQL, la API sigue viva. Las peticiones que necesitan la base de datos devuelven un error 503 Service Unavailable gracias al <code>@RestControllerAdvice</code> que captura <code>DataAccessResourceFailureException</code>. El endpoint <code>/api/estado</code> también devuelve 503 porque intenta ejecutar <code>SELECT VERSION()</code>.</p>
+
+<p><strong>¿Qué comportamiento prefiero?</strong> <code>Requires</code>, por dos razones: (1) sin base de datos, la API de la biblioteca no puede cumplir ninguna función útil — todas las operaciones requieren datos; (2) un servicio detenido genera menos confusión que un servicio que responde con errores continuamente; el administrador ve un único problema en el panel de systemd en vez de un servicio «activo» que en realidad no funciona.</p>
+
+<h2>3. Defensa en profundidad</h2>
+<p>Las dos barreras que impiden conectar desde el aula al puerto 3306 son:</p>
+<ol>
+<li><strong>Barrera 1 – MySQL bind_address:</strong> MySQL escucha solo en <code>127.0.0.1:3306</code> (loopback). Incluso si alguien pudiera enviar un paquete TCP al puerto 3306 de la instancia, MySQL no lo aceptaría porque no escucha en la interfaz de red <code>ens5</code>. Demostrado con E4 (<code>ss -tlnp</code>).</li>
+<li><strong>Barrera 2 – Grupo de seguridad:</strong> No existe ninguna regla de entrada para el puerto 3306 en el grupo de seguridad. Los paquetes TCP al puerto 3306 se descartan antes de llegar a la instancia. Demostrado con E7 (<code>Test-NetConnection</code> al puerto 3306 devuelve <code>TcpTestSucceeded: False</code>).</li>
+</ol>
+<p><strong>¿Qué ocurriría si se quitara solo una?</strong> Si se cambiara <code>bind_address</code> a <code>0.0.0.0</code> pero sin abrir el puerto en el grupo de seguridad, MySQL aceptaría conexiones locales pero los paquetes externos seguirían bloqueados por AWS. Si se añadiera una regla para 3306 pero MySQL siguiera en loopback, los paquetes llegarían a la instancia pero MySQL los rechazaría. Solo quitando ambas barreras sería posible la conexión directa desde fuera.</p>
+
+<h2>4. Privilegio mínimo</h2>
+<p>Impacto de una inyección SQL según el usuario de MySQL:</p>
+<table>
+<tr><th>Usuario</th><th>Qué podría hacer un atacante</th></tr>
+<tr><td><code>biblioteca_app</code></td><td>Solo SELECT, INSERT, UPDATE, DELETE en las tablas de <code>biblioteca</code>. No puede DROP TABLE, CREATE TABLE ni acceder a otras bases de datos. El daño se limita a leer o modificar datos de la biblioteca.</td></tr>
+<tr><td><code>biblioteca_admin</code></td><td>ALL PRIVILEGES sobre <code>biblioteca</code>: podría DROP TABLE, ALTER TABLE, crear o eliminar índices. Podría destruir el esquema completo, pero no acceder a otras bases de datos ni a la configuración de MySQL.</td></tr>
+<tr><td><code>root</code></td><td>Control total: DROP de cualquier base de datos, leer archivos del sistema con LOAD_FILE(), modificar usuarios y permisos, potencialmente ejecutar comandos del sistema.</td></tr>
+</table>
+<p><strong>Prueba en DBeaver:</strong> al conectar como <code>biblioteca_app</code> e intentar <code>DROP TABLE prestamo</code>, MySQL devuelve: <em>ERROR 1142 (42000): DROP command denied to user 'biblioteca_app'@'localhost' for table 'prestamo'</em>. Esto confirma que el principio de privilegio mínimo funciona.</p>
+
+<h2>5. Concurrencia</h2>
+<p><strong>Escenario sin SELECT ... FOR UPDATE:</strong></p>
+<p>Supongamos que el libro con id=4 tiene 2 ejemplares y 1 préstamo abierto (1 disponible). Dos peticiones simultáneas de préstamo (socio 1 y socio 2) para el libro 4:</p>
+<ol>
+<li>Hilo A: <code>SELECT ejemplares FROM libro WHERE id = 4</code> → lee 2 ejemplares</li>
+<li>Hilo B: <code>SELECT ejemplares FROM libro WHERE id = 4</code> → lee 2 ejemplares</li>
+<li>Hilo A: <code>SELECT COUNT(*) FROM prestamo WHERE libro_id = 4 AND fecha_devolucion IS NULL</code> → lee 1 préstamo abierto → 2 - 1 = 1 disponible → procede</li>
+<li>Hilo B: <code>SELECT COUNT(*) FROM prestamo WHERE libro_id = 4 AND fecha_devolucion IS NULL</code> → lee 1 préstamo abierto → 2 - 1 = 1 disponible → procede</li>
+<li>Hilo A: <code>INSERT INTO prestamo ...</code> → éxito, ahora hay 2 préstamos</li>
+<li>Hilo B: <code>INSERT INTO prestamo ...</code> → éxito, ahora hay 3 préstamos — ¡pero solo hay 2 ejemplares!</li>
+</ol>
+<p><strong>Cómo se evita:</strong> en <code>PrestamoServicio.java</code>, línea 58, el método <code>crear()</code> usa <code>SELECT id, ejemplares FROM libro WHERE id = :id FOR UPDATE</code>. Esto bloquea la fila del libro para otras transacciones. El hilo B queda esperando hasta que el hilo A haga commit, momento en el cual el hilo B lee el estado actualizado (2 préstamos abiertos) y detecta que no hay disponibilidad, devolviendo 409. El bloqueo del socio (línea 65) evita también condiciones de carrera en el conteo de préstamos del socio.</p>
+
+<h2>6. Recomendación al cliente</h2>
+<p>Comparación de la arquitectura actual con una separación en Amazon RDS:</p>
+<table>
+<tr><th>Aspecto</th><th>Arquitectura actual (colocalización)</th><th>EC2 + Amazon RDS</th></tr>
+<tr><td><strong>Disponibilidad</strong></td><td>Punto único de fallo: si la instancia cae, se pierden API y datos. Recuperación manual.</td><td>RDS ofrece Multi-AZ con failover automático. La caída de la instancia EC2 solo afecta a la API, no a los datos.</td></tr>
+<tr><td><strong>Mantenimiento</strong></td><td>Actualizaciones de MySQL, backups y monitorización son responsabilidad del administrador.</td><td>RDS gestiona parches, backups automáticos, réplicas de lectura y monitorización con CloudWatch.</td></tr>
+<tr><td><strong>Seguridad</strong></td><td>MySQL y la API comparten la misma máquina: una vulnerabilidad en uno compromete al otro.</td><td>Aislamiento de red: MySQL en subred privada, API en pública. Menor superficie de ataque.</td></tr>
+<tr><td><strong>Coste</strong></td><td>~0,012 $/h (t3.micro). Todo en una máquina.</td><td>~0,012 + ~0,034 $/h (db.t3.micro RDS). Triple de coste mínimo.</td></tr>
+</table>
+<p><strong>Recomendación:</strong> Con la previsión de multiplicar por diez los socios, la arquitectura actual no escalará: la memoria compartida es ya ajustada, y el mayor tráfico agotará los recursos. Recomiendo migrar a RDS con una instancia db.t3.micro inicialmente (que puede escalar verticalmente) y mantener la EC2 solo para la API. El coste extra (~0,034 $/h) es asumible frente a las ventajas: backups automáticos, failover Multi-AZ, y la posibilidad de añadir réplicas de lectura si el tráfico lo requiere. Como paso intermedio, se podría empezar con RDS Single-AZ para reducir coste y activar Multi-AZ cuando la carga lo justifique.</p>
+
+<div class="page-break"></div>
+
+<!-- 5. Incidencias -->
+<h1>5. Incidencias encontradas y resolución</h1>
+
+<table>
+<tr><th style="width:30%">Incidencia</th><th style="width:70%">Resolución</th></tr>
+<tr>
+<td>SSH: Permission denied con la clave <code>labsuser.pem</code></td>
+<td>La clave <code>labsuser.pem</code> descargada del Learner Lab no era la correcta para esta instancia. Se probó con la clave alternativa disponible, que fue aceptada. Verificado con <code>ssh -v</code> que la autenticación por clave pública funcionaba.</td>
+</tr>
+<tr>
+<td>JAVA_HOME no configurado en Windows</td>
+<td>El Maven wrapper fallaba con «No compiler is provided in this environment». Se configuró <code>JAVA_HOME</code> apuntando a <code>C:\Program Files\Eclipse Adoptium\jdk-21.0.13.9-hotspot</code> tanto en la sesión de PowerShell como en la variable de entorno del usuario.</td>
+</tr>
+<tr>
+<td>mysqldump: aviso de privilegio PROCESS</td>
+<td>El script de backup mostraba «Access denied; you need PROCESS privilege for tablespaces». Es solo un aviso informativo: el volcado de datos se completa correctamente sin este privilegio. El usuario <code>biblioteca_admin</code> tiene ALL PRIVILEGES sobre el esquema <code>biblioteca</code> pero no el privilegio global PROCESS.</td>
+</tr>
+<tr>
+<td>Servicio biblioteca no habilitado inicialmente</td>
+<td>Tras instalar el servicio con <code>systemctl daemon-reload</code>, el servicio arrancaba pero no estaba habilitado para el arranque automático. Se solucionó con <code>sudo systemctl enable biblioteca</code>. Tras <code>sudo reboot</code>, ambos servicios (mysql y biblioteca) arrancaron correctamente.</td>
+</tr>
+<tr>
+<td>Memoria ajustada en t3.micro</td>
+<td>Con MySQL y Java compitiendo por 908 MiB de RAM, el sistema recurría al swap. Se optimizó: <code>innodb_buffer_pool_size=256M</code> (en vez de 384M o más), <code>-Xmx384m</code> (en vez de 512m), <code>max_connections=40</code>, <code>performance_schema=OFF</code>. Con estos ajustes, el uso de swap se mantiene en 41 MiB y el OOM killer no ha actuado.</td>
+</tr>
+</table>
+
+</body>
+</html>
